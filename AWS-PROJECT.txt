@@ -1,0 +1,379 @@
+AWS-PROJECT:
+CREATE A CODE COMMIT REPO
+
+MAKE CLONE INTO LOCAL, THEN CREATE FILES INSIDE LOCAL REPO, THEN UPLOAD TO CODE COMMIT REPO.
+
+configure local repo to codecommit repo
+------------------------------------------
+ssh-keygen -t rsa -b 4096 -C "codecommit"
+cat ~/.ssh/id_rsa.pub     -----> copy public key content
+Users--->Your IAM user---->Security credentials---->SSH public keys for AWS CodeCommit
+---->Upload SSH public key
+
+create  ~/.ssh/config  file  -----   paste below
+   Host git-codecommit.*.amazonaws.com
+        User APKAXXDZOETOTNSVOBFG      -------> replace from iam-->user-->SSH public keys for AWS CodeCommit
+        IdentityFile ~/.ssh/id_rsa
+
+git clone ssh://git-codecommit.ap-south-1.amazonaws.com/v1/repos/myrepo
+inside local repo,
+
+my-app/
+├── src/
+│   ├── main/java/com/example/
+│   │   ├── Application.java        ← Spring Boot entry point
+│   │   └── HelloController.java    ← Simple REST API
+│   └── test/java/com/example/
+│       └── ApplicationTest.java    ← Unit tests
+├── scripts/
+│   ├── stop_server.sh              ← Called before deployment
+|   ├── install_dependencies.sh     
+│   ├── start_server.sh             ← Called after deployment
+│   └── validate_service.sh         ← Health check after deploy
+├── buildspec.yml                   ← CodeBuild: how to BUILD
+├── buildspec_test.yml              ← CodeBuild: how to TEST
+├── appspec.yml                     ← CodeDeploy: how to DEPLOY
+└── pom.xml                         ← Maven build configuration
+└── settings.xml                    ←
+
+MANY CHANGES REQUIRED FROM BELOW SCRIPTS (DEPENDS ON CODE ARTIFACT ARN,CODEDEPLOY ARN,CODE ARTIFACT AND REPO NAMES, PIPELINE CONFIG)
+SO FIRST CREATE PIPELINE SERVICES THEN UPLOAD SCRIPTS WITH CHANGABLE VAULES 
+
+CREATE S3 BUCKET  - sample-project-bucket-1705
+
+CREATE SNS
+
+CREATE IAM ROLES
+
+MAKE A CODE ARTIFACT DOMAIN&REPO
+
+CREATE A CODE BUILD (BUILD PROJECT,TEST PROJECT) 2-PROJECTS
+
+CREATE A CODE DEPLOY (EC2)
+
+NOTIFICATION: PIPELINE ---> SETTING--->NOTIFICATION RULE
+
+
+
+src/main/java/com/example/Application.java
+=========================================
+// src/main/java/com/example/Application.java
+package com.example;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class Application {
+    public static void main(String[] args) {
+        SpringApplication.run(Application.class, args);
+    }
+}
+
+ src/main/java/com/example/HelloController.java
+================================================
+// src/main/java/com/example/HelloController.java
+package com.example;
+
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+public class HelloController {
+
+    @GetMapping("/")
+    public String home() {
+        return "Hello from AWS CI/CD Pipeline!";
+    }
+
+    @GetMapping("/health")
+    public String health() {
+        return "OK";
+    }
+}
+
+test/java/com/example/ApplicationTest.java 
+=============================================
+package com.example;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.boot.test.context.SpringBootTest;
+
+@SpringBootTest
+class ApplicationTest {
+
+    @Test
+    void contextLoads() {
+        // verifies the Spring Boot application starts successfully
+    }
+}
+
+scripts/install_dependencies.sh 
+==================================
+#!/bin/bash
+echo "Installing Java 17..."
+yum install java-17-amazon-corretto -y
+java -version
+
+scripts/start_server.sh
+============================
+#!/bin/bash
+mkdir -p /opt/myapp
+JAR_FILE=$(find /opt/myapp -name "*.jar" ! -name "*.original" | head -n 1)
+nohup java -jar /opt/myapp/my-app.jar \
+--server.port=8080 \
+> /var/log/myapp.log 2>&1 &
+echo $! > /var/run/myapp.pid
+sleep 20
+ 
+scripts/stop_server.sh 
+==========================
+#!/bin/bash
+PID_FILE=/var/run/myapp.pid
+if [ -f "$PID_FILE" ]; then
+    kill -9 $(cat $PID_FILE) 2>/dev/null || true
+    rm -f $PID_FILE
+fi
+echo "Server stopped."
+
+scripts/validate_service.sh 
+============================
+#!/bin/bash
+sleep 15
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health)
+if [ "$STATUS" != "200" ]; then
+    echo "Health check failed! Status: $STATUS"
+    exit 1
+fi
+echo "Health check passed!"
+
+appspec.yml 
+=======================
+version: 0.0
+os: linux
+
+files:
+  - source: /target/my-app.jar
+    destination: /opt/myapp/
+
+hooks:
+  BeforeInstall:
+    - location: scripts/install_dependencies.sh
+      timeout: 300
+      runas: root
+  ApplicationStop:
+    - location: scripts/stop_server.sh
+      timeout: 30
+      runas: root
+  ApplicationStart:
+    - location: scripts/start_server.sh
+      timeout: 60
+      runas: root
+  ValidateService:
+    - location: scripts/validate_service.sh
+      timeout: 30
+      runas: root
+
+ buildspec_test.yml
+========================
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      java: corretto17
+
+  build:
+    commands:
+      - echo "Running unit tests..."
+      - mvn test
+
+reports:
+  test-reports:
+    files:
+      - "**/*"
+    base-directory: target/surefire-reports
+    file-format: JUNITXML
+
+buildspec.yml 
+====================
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      java: corretto17
+
+  pre_build:
+    commands:
+      - echo "Getting CodeArtifact token..."
+      - CODEARTIFACT_AUTH_TOKEN=$(aws codeartifact get-authorization-token --domain my-domain --domain-owner 530683143389 --region ap-southeast-1 --query authorizationToken --output text)
+      - export CODEARTIFACT_AUTH_TOKEN
+
+  build:
+    commands:
+      - echo "Building application..."
+      - mvn clean package -Dmaven.test.skip=true
+
+  post_build:
+    commands:
+      - echo "Publishing to CodeArtifact..."
+      - mvn deploy -Dmaven.test.skip=true --settings settings.xml
+
+artifacts:
+  files:
+    - target/my-app.jar
+    - appspec.yml
+    - scripts/**/*
+  discard-paths: no
+
+cache:
+  paths:
+    - /root/.m2/**/*
+
+pom.xml 
+==========================
+
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+         https://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.2.0</version>
+    </parent>
+
+    <groupId>com.example</groupId>
+    <artifactId>my-app</artifactId>
+    <version>1.0-SNAPSHOT</version>
+    <name>my-app</name>
+
+    <properties>
+        <java.version>17</java.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+    <finalName>my-app</finalName>
+
+    <plugins>
+        <plugin>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-maven-plugin</artifactId>
+        </plugin>
+    </plugins>
+</build>
+
+    <distributionManagement>
+  <repository>
+    <id>my-domain--my-app-repo</id>
+    <name>my-domain--my-app-repo</name>
+    <url>https://my-domain-530683143389.d.codeartifact.ap-southeast-1.amazonaws.com/maven/my-app-repo/</url>
+  </repository>
+</distributionManagement>
+</project>
+
+
+settings.xml
+==============
+<settings>
+  <servers>
+    <server>
+      <id>my-domain--my-app-repo</id>
+      <username>aws</username>
+      <password>${env.CODEARTIFACT_AUTH_TOKEN}</password>
+    </server>
+  </servers>
+</settings>
+
+cd ~/.ssh  ==> vi config
+=========================
+Host git-codecommit.*.amazonaws.com
+    User APKAXXDZOETOXJNFSB7K                    ===> #iam user SSH ID for code commit
+    IdentityFile ~/.ssh/id_rsa                   
+
+http://YOUR_PUBLIC_IP:8080/
+http://YOUR_PUBLIC_IP:8080/health
+mvn deploy -Dmaven.test.skip=true --settings settings.xml
+
+aws codeartifact login \
+  --tool mvn \
+  --repository my-app-repo \
+  --domain my-domain \
+  --domain-owner 530683143389 \
+  --region ap-southeast-1
+
+aws codeartifact list-packages \
+  --domain my-domain \
+  --domain-owner 530683143389 \
+  --repository my-app-repo \
+  --format maven \
+  --region ap-southeast-1
+
+# Check pipeline status
+aws codepipeline get-pipeline-state \
+  --name my-app-pipeline \
+  --region ap-southeast-1 \
+  --query "stageStates[*].{Stage:stageName,Status:latestExecution.status}"
+
+# Watch build logs live
+aws logs tail /aws/codebuild/my-app \
+  --region ap-southeast-1 \
+  --follow
+
+# Check latest deployment
+aws deploy list-deployments \
+  --application-name my-app-deploy \
+  --deployment-group-name my-app-prod \
+  --region ap-southeast-1
+
+
+
+Summary
+===========
+Action Happens Automatically
+git push origin main	EventBridge detects the push to CodeCommit
+EventBridge event fires	CodePipeline execution starts
+SOURCE stage	Pipeline downloads your code from CodeCommit
+BUILD stage	CodeBuild runs buildspec.yml → compiles code → mvn deploy to CodeArtifact
+TEST stage	CodeBuild runs buildspec_test.yml → mvn test
+DEPLOY stage	CodeDeploy stops old server → copies JAR → starts new server → validates
+Stage fails at any point	SNS sends email to developer immediately
+All stages pass	App is live! SNS sends success email
+
+
+1. Always set region to ap-southeast-1 in every CLI command
+2. The EventBridge rule is created automatically when you choose CloudWatch Events in CodePipeline
+3. If buildspec.yml has a syntax error, CodeBuild will fail — check YAML indentation carefully
+4. CodeDeploy needs the EC2 tag (App=my-app) to find the right server
+5. Always confirm your SNS subscription email before testing the pipeline
+
+Common Errors & Quick Fixes
+================================
+Error	                                                     Fix
+Pipeline not triggered	          Check EventBridge rule is ENABLED. Go to EventBridge → Rules → verify rule exists
+CodeBuild: runtime not found	  Add runtime-versions: java: corretto17 under install phase in buildspec.yml
+CodeArtifact: 401 Unauthorized	  Re-run get-authorization-token command. Token expires after 12 hours
+CodeDeploy: No instances found	  Check EC2 tag: Key=App, Value=my-app matches exactly what is in deployment group
+CodeDeploy agent not running	  SSH into EC2 and run: sudo systemctl restart codedeploy-agent
+Health check failed (validate)    Increase sleep time in validate_service.sh — Spring Boot needs 15-20 seconds to start
+Email notification not received	  Go to SNS → Subscriptions → confirm status is Confirmed, not PendingConfirmation
+
+
+
+		
